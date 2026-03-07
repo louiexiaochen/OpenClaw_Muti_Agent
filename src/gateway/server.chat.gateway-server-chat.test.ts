@@ -413,6 +413,41 @@ describe("gateway server chat", () => {
     expect(textValues).toEqual(["hello", "real reply", "real text field reply", "NO_REPLY"]);
   });
 
+  test("chat.history hides internal subagent announce user messages", async () => {
+    const historyMessages = await loadChatHistoryWithMessages([
+      {
+        role: "user",
+        content: [{ type: "text", text: "A background task finished. Process the completion update now." }],
+        provenance: {
+          kind: "inter_session",
+          sourceTool: "subagent_announce",
+        },
+        timestamp: 1,
+      },
+      {
+        role: "user",
+        content: [{ type: "text", text: "OpenClaw runtime context (internal):\nlegacy payload" }],
+        provenance: {
+          kind: "inter_session",
+          sourceTool: "subagent_announce",
+        },
+        timestamp: 2,
+      },
+      {
+        role: "user",
+        content: [{ type: "text", text: "keep me" }],
+        provenance: {
+          kind: "inter_session",
+          sourceTool: "sessions_send",
+        },
+        timestamp: 3,
+      },
+    ]);
+
+    const textValues = collectHistoryTextValues(historyMessages);
+    expect(textValues).toEqual(["keep me"]);
+  });
+
   test("routes chat.send slash commands without agent runs", async () => {
     await withMainSessionStore(async () => {
       const spy = vi.mocked(agentCommand);

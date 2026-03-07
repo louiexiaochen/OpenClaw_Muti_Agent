@@ -817,6 +817,32 @@ describe("agentCommand", () => {
     expect(callArgs?.prompt).toBe("ping");
   });
 
+  it("moves leaked internal runtime context out of the user prompt", async () => {
+    const callArgs = await runEmbeddedWithTempConfig({
+      args: {
+        message:
+          "OpenClaw runtime context (internal):\nThis context is runtime-generated, not user-authored. Keep internal details private.\n\nAction:\nConvert this completion now.",
+        to: "+1333",
+        internalEvents: [
+          {
+            type: "task_completion",
+            source: "subagent",
+            childSessionKey: "agent:main:subagent:test",
+            childSessionId: "child-1",
+            announceType: "subagent task",
+            taskLabel: "do thing",
+            status: "ok",
+            statusLabel: "completed successfully",
+            result: "subagent result",
+            replyInstruction: "reply now",
+          },
+        ],
+      },
+    });
+    expect(callArgs?.prompt).toBe("A background task finished. Process the completion update now.");
+    expect(callArgs?.extraSystemPrompt ?? "").toContain("OpenClaw runtime context (internal):");
+  });
+
   it("passes through telegram accountId when delivering", async () => {
     await withTempHome(async (home) => {
       const store = path.join(home, "sessions.json");

@@ -19,7 +19,10 @@ import { runCliAgent } from "../agents/cli-runner.js";
 import { getCliSessionId, setCliSessionId } from "../agents/cli-session.js";
 import { DEFAULT_MODEL, DEFAULT_PROVIDER } from "../agents/defaults.js";
 import { FailoverError } from "../agents/failover-error.js";
-import { formatAgentInternalEventsForPrompt } from "../agents/internal-events.js";
+import {
+  formatAgentInternalEventsForPrompt,
+  stripLeakedInternalRuntimeContext,
+} from "../agents/internal-events.js";
 import { AGENT_LANE_SUBAGENT } from "../agents/lanes.js";
 import { loadModelCatalog } from "../agents/model-catalog.js";
 import { runWithModelFallback } from "../agents/model-fallback.js";
@@ -134,18 +137,32 @@ function resolveFallbackRetryPrompt(params: { body: string; isFallbackRetry: boo
   return "Continue where you left off. The previous model attempt failed or timed out.";
 }
 
-function prependInternalEventContext(
-  body: string,
-  events: AgentCommandOpts["internalEvents"],
-): string {
-  if (body.includes("OpenClaw runtime context (internal):")) {
-    return body;
+const INTERNAL_EVENT_FALLBACK_MESSAGE = "A background task finished. Process the completion update now.";
+
+function joinExtraSystemPrompt(parts: Array<string | undefined>): string | undefined {
+  const normalized = parts.map((part) => part?.trim()).filter((part): part is string => Boolean(part));
+  if (normalized.length === 0) {
+    return undefined;
   }
-  const renderedEvents = formatAgentInternalEventsForPrompt(events);
-  if (!renderedEvents) {
-    return body;
-  }
-  return [renderedEvents, body].filter(Boolean).join("\n\n");
+  return normalized.join("\n\n");
+}
+
+function resolveAgentPromptInput(params: {
+  message: string;
+  extraSystemPrompt?: string;
+  internalEvents?: AgentCommandOpts["internalEvents"];
+}): { body: string; extraSystemPrompt?: string } {
+  const renderedEvents = formatAgentInternalEventsForPrompt(params.internalEvents);
+  const originalMessage = params.message.trim();
+  const sanitizedMessage = stripLeakedInternalRuntimeContext(params.message).trim();
+  const strippedInternalBlock = sanitizedMessage !== originalMessage;
+  const body =
+    sanitizedMessage ||
+    (renderedEvents || strippedInternalBlock ? INTERNAL_EVENT_FALLBACK_MESSAGE : originalMessage);
+  return {
+    body,
+    extraSystemPrompt: joinExtraSystemPrompt([params.extraSystemPrompt, renderedEvents]),
+  };
 }
 
 function runAgentAttempt(params: {
@@ -164,6 +181,7 @@ function runAgentAttempt(params: {
   timeoutMs: number;
   runId: string;
   opts: AgentCommandOpts & { senderIsOwner: boolean };
+  extraSystemPrompt?: string;
   runContext: ReturnType<typeof resolveAgentRunContext>;
   spawnedBy: string | undefined;
   messageChannel: ReturnType<typeof resolveMessageChannel>;
@@ -200,7 +218,7 @@ function runAgentAttempt(params: {
         thinkLevel: params.resolvedThinkLevel,
         timeoutMs: params.timeoutMs,
         runId: params.runId,
-        extraSystemPrompt: params.opts.extraSystemPrompt,
+        extraSystemPrompt: params.extraSystemPrompt,
         cliSessionId: nextCliSessionId,
         bootstrapPromptWarningSignaturesSeen,
         bootstrapPromptWarningSignature,
@@ -320,7 +338,7 @@ function runAgentAttempt(params: {
     runId: params.runId,
     lane: params.opts.lane,
     abortSignal: params.opts.abortSignal,
-    extraSystemPrompt: params.opts.extraSystemPrompt,
+    extraSystemPrompt: params.extraSystemPrompt,
     inputProvenance: params.opts.inputProvenance,
     streamParams: params.opts.streamParams,
     agentDir: params.agentDir,
@@ -339,7 +357,13 @@ async function agentCommandInternal(
   if (!message) {
     throw new Error("Message (--message) is required");
   }
-  const body = prependInternalEventContext(message, opts.internalEvents);
+  const promptInput = resolveAgentPromptInput({
+    message,
+    extraSystemPrompt: opts.extraSystemPrompt,
+    internalEvents: opts.internalEvents,
+  });
+  const body = promptInput.body;
+  const extraSystemPrompt = promptInput.extraSystemPrompt;
   if (!opts.to && !opts.sessionId && !opts.sessionKey && !opts.agentId) {
     throw new Error("Pass --to <E.164>, --session-id, or --agent to choose a session");
   }
@@ -857,6 +881,7 @@ async function agentCommandInternal(
             timeoutMs,
             runId,
             opts,
+            extraSystemPrompt,
             runContext,
             spawnedBy,
             messageChannel,
