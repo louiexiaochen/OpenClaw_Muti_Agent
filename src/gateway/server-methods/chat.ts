@@ -11,6 +11,7 @@ import { isSilentReplyText, SILENT_REPLY_TOKEN } from "../../auto-reply/tokens.j
 import { createReplyPrefixOptions } from "../../channels/reply-prefix.js";
 import { resolveSessionFilePath } from "../../config/sessions.js";
 import { jsonUtf8Bytes } from "../../infra/json-utf8-bytes.js";
+import { normalizeInputProvenance } from "../../sessions/input-provenance.js";
 import { resolveSendPolicy } from "../../sessions/send-policy.js";
 import { parseAgentSessionKey } from "../../sessions/session-key-utils.js";
 import {
@@ -79,6 +80,8 @@ type AbortedPartialSnapshot = {
 const CHAT_HISTORY_TEXT_MAX_CHARS = 12_000;
 const CHAT_HISTORY_MAX_SINGLE_MESSAGE_BYTES = 128 * 1024;
 const CHAT_HISTORY_OVERSIZED_PLACEHOLDER = "[chat.history omitted: message too large]";
+const INTERNAL_EVENT_FALLBACK_MESSAGE =
+  "A background task finished. Process the completion update now.";
 let chatHistoryPlaceholderEmitCount = 0;
 const CHANNEL_AGNOSTIC_SESSION_SCOPES = new Set([
   "main",
@@ -249,6 +252,59 @@ function extractAssistantTextForSilentCheck(message: unknown): string | undefine
   return texts.length > 0 ? texts.join("\n") : undefined;
 }
 
+function extractUserTextForInternalCheck(message: unknown): string | undefined {
+  if (!message || typeof message !== "object") {
+    return undefined;
+  }
+  const entry = message as Record<string, unknown>;
+  if (entry.role !== "user") {
+    return undefined;
+  }
+  if (typeof entry.text === "string") {
+    return entry.text;
+  }
+  if (typeof entry.content === "string") {
+    return entry.content;
+  }
+  if (!Array.isArray(entry.content) || entry.content.length === 0) {
+    return undefined;
+  }
+  const texts: string[] = [];
+  for (const block of entry.content) {
+    if (!block || typeof block !== "object") {
+      return undefined;
+    }
+    const typed = block as { type?: unknown; text?: unknown };
+    if (typed.type !== "text" || typeof typed.text !== "string") {
+      return undefined;
+    }
+    texts.push(typed.text);
+  }
+  return texts.length > 0 ? texts.join("\n") : undefined;
+}
+
+function shouldHideInternalSubagentAnnounceMessage(message: unknown): boolean {
+  if (!message || typeof message !== "object") {
+    return false;
+  }
+  const entry = message as Record<string, unknown>;
+  if (entry.role !== "user") {
+    return false;
+  }
+  const provenance = normalizeInputProvenance(entry.provenance);
+  if (provenance?.kind !== "inter_session" || provenance.sourceTool !== "subagent_announce") {
+    return false;
+  }
+  const text = extractUserTextForInternalCheck(message)?.trim() ?? "";
+  if (!text) {
+    return false;
+  }
+  if (text.includes("OpenClaw runtime context (internal):")) {
+    return true;
+  }
+  return text === INTERNAL_EVENT_FALLBACK_MESSAGE;
+}
+
 function sanitizeChatHistoryMessages(messages: unknown[]): unknown[] {
   if (messages.length === 0) {
     return messages;
@@ -261,6 +317,10 @@ function sanitizeChatHistoryMessages(messages: unknown[]): unknown[] {
     // Drop assistant messages whose entire visible text is the silent reply token.
     const text = extractAssistantTextForSilentCheck(res.message);
     if (text !== undefined && isSilentReplyText(text, SILENT_REPLY_TOKEN)) {
+      changed = true;
+      continue;
+    }
+    if (shouldHideInternalSubagentAnnounceMessage(res.message)) {
       changed = true;
       continue;
     }

@@ -1,4 +1,5 @@
 import { AGENT_LANE_NESTED } from "../../agents/lanes.js";
+import { stripLeakedInternalRuntimeContext } from "../../agents/internal-events.js";
 import { getChannelPlugin, normalizeChannelId } from "../../channels/plugins/index.js";
 import { createOutboundSendDeps, type CliDeps } from "../../cli/outbound-send-deps.js";
 import type { OpenClawConfig } from "../../config/config.js";
@@ -26,6 +27,28 @@ type RunResult = Awaited<
 >;
 
 const NESTED_LOG_PREFIX = "[agent:nested]";
+
+function sanitizeAgentPayloads(payloads: RunResult["payloads"]): RunResult["payloads"] {
+  if (!payloads || payloads.length === 0) {
+    return payloads;
+  }
+  const sanitized = payloads
+    .map((payload) => {
+      if (!payload?.text) {
+        return payload;
+      }
+      const cleanedText = stripLeakedInternalRuntimeContext(payload.text);
+      if (!cleanedText.trim() && !payload.mediaUrl) {
+        return null;
+      }
+      return {
+        ...payload,
+        text: cleanedText,
+      };
+    })
+    .filter((payload): payload is NonNullable<(typeof payloads)[number]> => payload !== null);
+  return sanitized;
+}
 
 function formatNestedLogPrefix(opts: AgentCommandOpts, sessionKey?: string): string {
   const parts = [NESTED_LOG_PREFIX];
@@ -74,7 +97,8 @@ export async function deliverAgentCommandResult(params: {
   result: RunResult;
   payloads: RunResult["payloads"];
 }) {
-  const { cfg, deps, runtime, opts, outboundSession, sessionEntry, payloads, result } = params;
+  const { cfg, deps, runtime, opts, outboundSession, sessionEntry, result } = params;
+  const payloads = sanitizeAgentPayloads(params.payloads);
   const effectiveSessionKey = outboundSession?.key ?? opts.sessionKey;
   const deliver = opts.deliver === true;
   const bestEffortDeliver = opts.bestEffortDeliver === true;

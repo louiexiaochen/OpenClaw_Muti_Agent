@@ -16,6 +16,12 @@ export type AgentTaskCompletionInternalEvent = {
 
 export type AgentInternalEvent = AgentTaskCompletionInternalEvent;
 
+export const INTERNAL_CONTEXT_BEGIN_MARKER = "<<<BEGIN_OPENCLAW_INTERNAL_CONTEXT>>>";
+export const INTERNAL_CONTEXT_END_MARKER = "<<<END_OPENCLAW_INTERNAL_CONTEXT>>>";
+const INTERNAL_CONTEXT_HEADER = "OpenClaw runtime context (internal):";
+const INTERNAL_CONTEXT_PRIVACY_LINE =
+  "This context is runtime-generated, not user-authored. Keep internal details private.";
+
 function formatTaskCompletionEvent(event: AgentTaskCompletionInternalEvent): string {
   const lines = [
     "[Internal task completion event]",
@@ -52,9 +58,43 @@ export function formatAgentInternalEventsForPrompt(events?: AgentInternalEvent[]
     return "";
   }
   return [
-    "OpenClaw runtime context (internal):",
-    "This context is runtime-generated, not user-authored. Keep internal details private.",
+    INTERNAL_CONTEXT_BEGIN_MARKER,
+    INTERNAL_CONTEXT_HEADER,
+    INTERNAL_CONTEXT_PRIVACY_LINE,
     "",
     blocks.join("\n\n---\n\n"),
+    INTERNAL_CONTEXT_END_MARKER,
   ].join("\n");
+}
+
+function escapeRegExp(input: string): string {
+  return input.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * Strip leaked internal runtime context when a model accidentally echoes
+ * the hidden orchestration block back to users.
+ */
+export function stripLeakedInternalRuntimeContext(text: string): string {
+  if (!text) {
+    return text;
+  }
+  let next = text;
+  const begin = escapeRegExp(INTERNAL_CONTEXT_BEGIN_MARKER);
+  const end = escapeRegExp(INTERNAL_CONTEXT_END_MARKER);
+  const markedBlock = new RegExp(`${begin}[\\s\\S]*?${end}\\s*`, "g");
+  next = next.replace(markedBlock, "");
+
+  // Legacy fallback for context blocks generated before explicit markers existed.
+  if (next.includes(INTERNAL_CONTEXT_HEADER)) {
+    next = next.replace(
+      /OpenClaw runtime context \(internal\):[\s\S]*?(?:\nAction:\n[^\n]*(?:\n|$))/g,
+      "",
+    );
+    if (next.includes(INTERNAL_CONTEXT_HEADER)) {
+      next = next.replace(/OpenClaw runtime context \(internal\):[\s\S]*$/g, "");
+    }
+  }
+
+  return next.replace(/\n{3,}/g, "\n\n").trim();
 }

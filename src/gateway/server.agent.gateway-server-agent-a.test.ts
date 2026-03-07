@@ -215,6 +215,33 @@ describe("gateway server agent", () => {
     expect(call.to).toBeUndefined();
   });
 
+  test("agent skips timestamp prefix for inter-session provenance", async () => {
+    setRegistry(defaultRegistry);
+    await setTestSessionStore({
+      entries: {
+        main: {
+          sessionId: "sess-main-inter-session",
+          updatedAt: Date.now(),
+        },
+      },
+    });
+
+    const res = await rpcReq(ws, "agent", {
+      message: "child done",
+      sessionKey: "main",
+      inputProvenance: {
+        kind: "inter_session",
+        sourceTool: "subagent_announce",
+      },
+      idempotencyKey: "idem-agent-inter-session-no-timestamp",
+    });
+    expect(res.ok).toBe(true);
+
+    const call = latestAgentCall();
+    expect(call.sessionKey).toBe("agent:main:main");
+    expect(call.message).toBe("child done");
+  });
+
   test("agent preserves spawnDepth on subagent sessions", async () => {
     setRegistry(defaultRegistry);
     await setTestSessionStore({
